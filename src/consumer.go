@@ -13,8 +13,11 @@ import (
     "mylib"
 	"encoding/json"
 	"encoding/xml"
-	"os"
+	//"os"
 	"runtime"
+	"net/http"
+	"io/ioutil"
+	"bytes"
 )
 
 var (
@@ -174,6 +177,7 @@ func (c *Consumer) Shutdown() error {
 }
 
 func handle(deliveries <-chan amqp.Delivery, done chan error) {
+	client := &http.Client{}
 	for d := range deliveries {
 		order := mylib.Order{}
 		log.Printf(
@@ -188,13 +192,34 @@ func handle(deliveries <-chan amqp.Delivery, done chan error) {
 		content := mylib.Content(createOrder)
 		soapBody := mylib.SoapBody{Content: content}
 		v := &mylib.Soap12Envelope{Xsi: "http://www.w3.org/2001/XMLSchema-instance", Xsd: "http://www.w3.org/2001/XMLSchema", Soap12: "http://www.w3.org/2003/05/soap-envelope", SoapBody: soapBody}
-		enc := xml.NewEncoder(os.Stdout)
+		
+		// bytes buffer - super efficient and implements io.writer and io.reader..covers all the needs
+		buf := new(bytes.Buffer)
+		// create an encoder that will encode to our buffer
+		enc := xml.NewEncoder(buf)
+		// pretty formatting .. doesn't do much
 		enc.Indent("  ", "    ")
 		if err := enc.Encode(v); err != nil {
 			fmt.Printf("error: %v\n", err)
 		}
-		// lets fake an API post
-		time.Sleep(1000 * time.Millisecond)
+		// post to our fake server
+		req, err  := http.NewRequest("POST", "http://localhost:8080", buf)
+		// perform the actual post and read data and possible errors
+		resp, err := client.Do(req)
+		// extract response body from response
+		body, _   := ioutil.ReadAll(resp.Body)
+		// parse the soap reply and extract status code
+		orderResponse := mylib.OrderResponse{}
+		err = xml.Unmarshal(body, &orderResponse)
+		if err != nil {
+			fmt.Printf("error: %v", err)
+			return
+		}
+		fmt.Println(orderResponse.Body.OrderResponse.CreateOrderResult)		
+		
+		if err != nil{
+			fmt.Println(err)
+		}
 		
 		d.Ack(false)
 	}
