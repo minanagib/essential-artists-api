@@ -17,3 +17,9 @@ merch orders integrating with essential artists API
 
 [PHP 3rd party libraries]
 - AMQP Client https://github.com/videlalvaro/php-amqplib
+
+
+
+[Source Code]
+- src/consumer.go - AMQP client responsible for serializing JSON messages from RabbitMQ and submitting orders to the third-party API
+- src/server-essential-artists-api/fake_server.go - HTTP server that accepts requests from the consumer and replies back with a SOAP formatted result
