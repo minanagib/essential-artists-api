@@ -5,30 +5,30 @@
 package main
 
 import (
+	"bytes"
+	"crowdsurge/messages/gen-go/order"
+	"encoding/xml"
 	"flag"
 	"fmt"
+	"git.apache.org/thrift.git/lib/go/thrift"
 	"github.com/streadway/amqp"
-	"log"
-	"time"
-    "mylib"
-	"encoding/json"
-	"encoding/xml"
-	//"os"
-	"runtime"
-	"net/http"
 	"io/ioutil"
-	"bytes"
+	"log"
+	"mylib"
+	"net/http"
+	"runtime"
+	"time"
 )
 
 var (
-	uri          = flag.String("uri", "amqp://guest:guest@localhost:5672/", "AMQP URI")
-	exchange     = flag.String("exchange", "router", "Durable, non-auto-deleted AMQP exchange name")
-	exchangeType = flag.String("exchange-type", "direct", "Exchange type - direct|fanout|topic|x-custom")
-	queue        = flag.String("queue", "orders.fullfilment", "Ephemeral AMQP queue name")
-	bindingKey   = flag.String("key", "orders.fullfilment", "AMQP binding key")
-	consumerTag  = flag.String("consumer-tag", "", "AMQP consumer tag (should not be blank)")
-	lifetime     = flag.Duration("lifetime", 0, "lifetime of process before shutdown (0s=infinite)")
-	cpu         =  flag.Int("cpu", 1, "number of cpus to use")
+	uri                 = flag.String("uri", "amqp://guest:guest@localhost:5672/", "AMQP URI")
+	exchange            = flag.String("exchange", "router", "Durable, non-auto-deleted AMQP exchange name")
+	exchangeType        = flag.String("exchange-type", "direct", "Exchange type - direct|fanout|topic|x-custom")
+	queue               = flag.String("queue", "orders.fullfilment", "Ephemeral AMQP queue name")
+	bindingKey          = flag.String("key", "orders.fullfilment", "AMQP binding key")
+	consumerTag         = flag.String("consumer-tag", "", "AMQP consumer tag (should not be blank)")
+	lifetime            = flag.Duration("lifetime", 0, "lifetime of process before shutdown (0s=infinite)")
+	cpu                 = flag.Int("cpu", 1, "number of cpus to use")
 	concurrentConsumers = flag.Int("concurrent-consumers", 1, "concurrent consumers to run")
 )
 
@@ -37,9 +37,9 @@ func init() {
 }
 
 func main() {
-    // Dynamically setting num-of-cpus at runtime
+	// Dynamically setting num-of-cpus at runtime
 	// runtime.GOMAXPROCS(runtime.NumCPU())
-	
+
 	// Using arguments passed by command line
 	runtime.GOMAXPROCS(*cpu)
 	c, err := NewConsumer(*uri, *exchange, *exchangeType, *queue, *bindingKey, *consumerTag, *concurrentConsumers)
@@ -91,7 +91,7 @@ func NewConsumer(amqpURI, exchange, exchangeType, queueName, key, ctag string, c
 
 	log.Printf("got Connection, getting Channel")
 	c.channel, err = c.conn.Channel()
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("Channel: %s", err)
 	}
@@ -134,15 +134,15 @@ func NewConsumer(amqpURI, exchange, exchangeType, queueName, key, ctag string, c
 	); err != nil {
 		return nil, fmt.Errorf("Queue Bind: %s", err)
 	}
-	
+
 	// How many messages to recieve at a time - this allows for fair dispatching
-    c.channel.Qos(100,0,false)
-    
+	c.channel.Qos(100, 0, false)
+
 	log.Printf("Queue bound to Exchange, starting Consume (consumer tag %q)", c.tag)
 	deliveries, err := c.channel.Consume(
 		queue.Name, // name
 		c.tag,      // consumerTag,
-		false,       // noAck
+		false,      // noAck
 		false,      // exclusive
 		false,      // noLocal
 		false,      // noWait
@@ -179,20 +179,41 @@ func (c *Consumer) Shutdown() error {
 func handle(deliveries <-chan amqp.Delivery, done chan error) {
 	client := &http.Client{}
 	for d := range deliveries {
-		order := mylib.Order{}
+		apiOrder := mylib.Order{}
 		log.Printf(
 			"got %dB delivery: [%v] %q",
 			len(d.Body),
 			d.DeliveryTag,
 			d.Body,
 		)
-		
-		json.Unmarshal([]byte(d.Body), &order)
-		createOrder := mylib.CreateOrder{Xmlns: "http://dc.artistservices.com/ClientID/v1/", Order: order}
+
+		// Thrift Order Object
+		_order := order.Order{}
+
+		// Create a serializer
+		t := thrift.NewTSerializer()
+
+		deserializer := thrift.NewTDeserializer()
+		// Serliazation "format"
+		protocol := thrift.NewTBinaryProtocolFactoryDefault()
+		t.Protocol = protocol.GetProtocol(t.Transport)
+
+		// Serialization magic
+		_, err := t.WriteString(&_order)
+		err = deserializer.Read(&_order, d.Body)
+
+		for _, orderLine := range _order.OrderLineList {
+			fmt.Println(orderLine)
+			// Create API essentials orderLine
+			apiOrderLine := mylib.OrderLine{OrderNumber: orderLine.OrderId, ProductID: orderLine.ProductId}
+			apiOrder.OrderLine = append(apiOrder.OrderLine, apiOrderLine)
+		}
+
+		createOrder := mylib.CreateOrder{Xmlns: "http://dc.artistservices.com/ClientID/v1/", Order: apiOrder}
 		content := mylib.Content(createOrder)
 		soapBody := mylib.SoapBody{Content: content}
 		v := &mylib.Soap12Envelope{Xsi: "http://www.w3.org/2001/XMLSchema-instance", Xsd: "http://www.w3.org/2001/XMLSchema", Soap12: "http://www.w3.org/2003/05/soap-envelope", SoapBody: soapBody}
-		
+
 		// bytes buffer - super efficient and implements io.writer and io.reader..covers all the needs
 		buf := new(bytes.Buffer)
 		// create an encoder that will encode to our buffer
@@ -203,11 +224,11 @@ func handle(deliveries <-chan amqp.Delivery, done chan error) {
 			fmt.Printf("error: %v\n", err)
 		}
 		// post to our fake server
-		req, err  := http.NewRequest("POST", "http://localhost:8080", buf)
+		req, err := http.NewRequest("POST", "http://localhost:8080", buf)
 		// perform the actual post and read data and possible errors
 		resp, err := client.Do(req)
 		// extract response body from response
-		body, _   := ioutil.ReadAll(resp.Body)
+		body, _ := ioutil.ReadAll(resp.Body)
 		// parse the soap reply and extract status code
 		orderResponse := mylib.OrderResponse{}
 		err = xml.Unmarshal(body, &orderResponse)
@@ -215,12 +236,12 @@ func handle(deliveries <-chan amqp.Delivery, done chan error) {
 			fmt.Printf("error: %v", err)
 			return
 		}
-		fmt.Println(orderResponse.Body.OrderResponse.CreateOrderResult)		
-		
-		if err != nil{
+		fmt.Println(orderResponse.Body.OrderResponse.CreateOrderResult)
+
+		if err != nil {
 			fmt.Println(err)
 		}
-		
+
 		d.Ack(false)
 	}
 	log.Printf("handle: deliveries channel closed")
